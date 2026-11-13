@@ -3,5 +3,5 @@
 	url = https://github.com/shikijs/textmate-grammars-themes.git
 [submodule "vscode-textmate"]
 	path = vscode-textmate
-	url = git@github.com:microsoft/vscode-textmate.git
+	url = https://github.com/microsoft/vscode-textmate.git
 	ignore = dirty

@@ -3,6 +3,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::highlight::HighlightedText;
 use crate::registry::HighlightedCode;
 use crate::renderers::RenderOptions;
 use crate::themes::css::{DARK_SUFFIX, LIGHT_SUFFIX};
@@ -74,78 +75,28 @@ impl Default for HtmlRenderer {
     }
 }
 
+struct LineRenderContext<'a> {
+    highlighted: &'a HighlightedCode<'a>,
+    options: &'a RenderOptions,
+    css_prefix: Option<&'a str>,
+    line_numbers_size: usize,
+    highlight_style: Option<String>,
+    line_number_style: Option<String>,
+}
+
 impl HtmlRenderer {
     /// Renders the given highlighted code to an HTML string.
     /// This will also handle automatic light/dark theming and escaping characters.
     pub fn render(&self, highlighted: &HighlightedCode, options: &RenderOptions) -> String {
         let lang = highlighted.language;
         let css_prefix = self.css_class_prefix.as_deref();
-
-        // Precompute structural CSS classes (code, hl).
-        // For dual themes, we insert both light and dark classes
-        let (code_class, hl_class) = match css_prefix {
-            Some(p) => match &highlighted.theme {
-                ThemeVariant::Single(_) => (Some(format!("{p}code")), format!("{p}hl")),
-                ThemeVariant::Dual { .. } => (
-                    Some(format!("{p}{LIGHT_SUFFIX}code {p}{DARK_SUFFIX}code")),
-                    format!("{p}{LIGHT_SUFFIX}hl {p}{DARK_SUFFIX}hl"),
-                ),
-            },
-            None => (None, String::new()),
-        };
-
-        // Pre-compute highlight background CSS/class if available
-        let highlight_attr = if !options.highlight_lines.is_empty() {
-            if css_prefix.is_some() {
-                // CSS class mode: use hl class
-                Some(format!(r#" class="{hl_class}""#))
-            } else {
-                // Inline style mode
-                match &highlighted.theme {
-                    ThemeVariant::Single(theme) => theme
-                        .highlight_background_color
-                        .as_ref()
-                        .map(|c| format!(r#" style="{}""#, c.as_css_bg_color_property())),
-                    ThemeVariant::Dual { light, dark } => {
-                        match (
-                            &light.highlight_background_color,
-                            &dark.highlight_background_color,
-                        ) {
-                            (Some(l), Some(d)) => Some(format!(
-                                r#" style="{}""#,
-                                Color::as_css_light_dark_bg_color_property(l, d)
-                            )),
-                            _ => None,
-                        }
-                    }
-                }
+        let code_class = css_prefix.map(|p| match &highlighted.theme {
+            ThemeVariant::Single(_) => format!("{p}code"),
+            ThemeVariant::Dual { .. } => {
+                format!("{p}{LIGHT_SUFFIX}code {p}{DARK_SUFFIX}code")
             }
-        } else {
-            None
-        };
-
-        // Pre-compute line number color style if available (inline style mode only)
-        let line_number_style = if options.show_line_numbers && css_prefix.is_none() {
-            match &highlighted.theme {
-                ThemeVariant::Single(theme) => theme
-                    .line_number_foreground
-                    .as_ref()
-                    .map(|c| format!(r#" style="{}""#, c.as_css_color_property())),
-                ThemeVariant::Dual { light, dark } => {
-                    match (&light.line_number_foreground, &dark.line_number_foreground) {
-                        (Some(l), Some(d)) => Some(format!(
-                            r#" style="{}""#,
-                            Color::as_css_light_dark_color_property(l, d)
-                        )),
-                        _ => None,
-                    }
-                }
-            }
-        } else {
-            None
-        };
-
-        let line_numbers_size = options.line_number_width(highlighted.tokens.len());
+        });
+        let ctx = self.render_context(highlighted, options);
         let mut lines = Vec::with_capacity(highlighted.tokens.len() + 4);
         let mut tokens = highlighted.tokens.iter().enumerate().peekable();
         while let Some((idx, line_tokens)) = tokens.next() {
@@ -161,54 +112,7 @@ impl HtmlRenderer {
                 continue;
             }
 
-            // Render tokens
-            let mut line_content = Vec::with_capacity(line_tokens.len());
-            for tok in line_tokens {
-                line_content.push(tok.as_html(&highlighted.theme, css_prefix));
-            }
-            let line_content = line_content.join("");
-
-            // Line number (uses original source line number, padded with spaces)
-            let display_line_num = options.line_number_start + (idx as isize);
-            let line_number_html = if options.show_line_numbers {
-                let line_num_s = display_line_num.to_string();
-                let padded =
-                    std::iter::repeat_n(' ', line_numbers_size - line_num_s.chars().count())
-                        .chain(line_num_s.chars())
-                        .collect::<String>();
-                format!(
-                    r#"<span aria-hidden="true" class="giallo-ln"{}>{padded}</span>"#,
-                    line_number_style.as_deref().unwrap_or_default()
-                )
-            } else {
-                String::new()
-            };
-
-            // Build line span, with highlight if applicable
-            let is_highlighted = options
-                .highlight_lines
-                .iter()
-                .any(|r| r.contains(&line_num));
-            let line_html = match (is_highlighted, &highlight_attr) {
-                (true, Some(hl_class_or_style)) => {
-                    format!(
-                        r#"<span class="giallo-l{hl_class_or_style}"{hl_style}>{line_number_html}{line_content}</span>"#,
-                        hl_class_or_style = if css_prefix.is_some() {
-                            format!(" {hl_class}")
-                        } else {
-                            String::new()
-                        },
-                        hl_style = if css_prefix.is_none() {
-                            hl_class_or_style
-                        } else {
-                            ""
-                        }
-                    )
-                }
-                _ => format!(r#"<span class="giallo-l">{line_number_html}{line_content}</span>"#),
-            };
-
-            lines.push(line_html);
+            lines.push(self.render_line(&ctx, idx, line_tokens));
         }
         let lines = lines.join("\n");
 
@@ -280,6 +184,150 @@ impl HtmlRenderer {
                     r#"<pre class="giallo" style="{color_scheme}{fg} {bg}" {pre_data_attrs}>{before_code_html}<code {code_data_attrs}>{lines}</code>{after_code_html}</pre>"#
                 )
             }
+        }
+    }
+
+    /// Renders one HTML fragment per source line, preserving a 1:1 mapping
+    /// with `highlighted.tokens`.
+    ///
+    /// Unlike [`Self::render`], this keeps trailing empty lines and does not
+    /// apply [`RenderOptions::hide_lines`]. It is intended for callers that lay
+    /// out each line themselves, such as a table with a gutter of their own.
+    ///
+    /// Line numbers and highlighted-line rendering are controlled by the
+    /// renderer's options exactly as they are for [`Self::render`].
+    pub fn render_lines(
+        &self,
+        highlighted: &HighlightedCode,
+        options: &RenderOptions,
+    ) -> Vec<String> {
+        let ctx = self.render_context(highlighted, options);
+        highlighted
+            .tokens
+            .iter()
+            .enumerate()
+            .map(|(idx, line_tokens)| self.render_line(&ctx, idx, line_tokens))
+            .collect()
+    }
+
+    /// Precompute the per-render values shared by every line.
+    fn render_context<'a>(
+        &'a self,
+        highlighted: &'a HighlightedCode,
+        options: &'a RenderOptions,
+    ) -> LineRenderContext<'a> {
+        let css_prefix = self.css_class_prefix.as_deref();
+
+        let highlight_style = if !options.highlight_lines.is_empty() && css_prefix.is_none() {
+            match &highlighted.theme {
+                ThemeVariant::Single(theme) => theme
+                    .highlight_background_color
+                    .as_ref()
+                    .map(|c| format!(r#" style="{}""#, c.as_css_bg_color_property())),
+                ThemeVariant::Dual { light, dark } => {
+                    match (
+                        &light.highlight_background_color,
+                        &dark.highlight_background_color,
+                    ) {
+                        (Some(l), Some(d)) => Some(format!(
+                            r#" style="{}""#,
+                            Color::as_css_light_dark_bg_color_property(l, d)
+                        )),
+                        _ => None,
+                    }
+                }
+            }
+        } else {
+            None
+        };
+
+        let line_number_style = if options.show_line_numbers && css_prefix.is_none() {
+            match &highlighted.theme {
+                ThemeVariant::Single(theme) => theme
+                    .line_number_foreground
+                    .as_ref()
+                    .map(|c| format!(r#" style="{}""#, c.as_css_color_property())),
+                ThemeVariant::Dual { light, dark } => {
+                    match (&light.line_number_foreground, &dark.line_number_foreground) {
+                        (Some(l), Some(d)) => Some(format!(
+                            r#" style="{}""#,
+                            Color::as_css_light_dark_color_property(l, d)
+                        )),
+                        _ => None,
+                    }
+                }
+            }
+        } else {
+            None
+        };
+
+        LineRenderContext {
+            highlighted,
+            options,
+            css_prefix,
+            line_numbers_size: options.line_number_width(highlighted.tokens.len()),
+            highlight_style,
+            line_number_style,
+        }
+    }
+
+    /// Render one line, without applying hidden/trailing-line filtering.
+    fn render_line(
+        &self,
+        ctx: &LineRenderContext<'_>,
+        idx: usize,
+        line_tokens: &[HighlightedText],
+    ) -> String {
+        let LineRenderContext {
+            highlighted,
+            options,
+            css_prefix,
+            line_numbers_size,
+            highlight_style,
+            line_number_style,
+        } = ctx;
+
+        // Render tokens
+        let mut line_content = Vec::with_capacity(line_tokens.len());
+        for tok in line_tokens {
+            line_content.push(tok.as_html(&highlighted.theme, *css_prefix));
+        }
+        let line_content = line_content.join("");
+
+        let line_num = idx + 1;
+        let display_line_num = options.line_number_start + (idx as isize);
+
+        // Line number (uses original source line number, padded with spaces)
+        let line_number_html = if options.show_line_numbers {
+            let line_num_s = display_line_num.to_string();
+            let padded = std::iter::repeat_n(' ', line_numbers_size - line_num_s.chars().count())
+                .chain(line_num_s.chars())
+                .collect::<String>();
+            format!(
+                r#"<span aria-hidden="true" class="giallo-ln"{}>{padded}</span>"#,
+                line_number_style.as_deref().unwrap_or_default()
+            )
+        } else {
+            String::new()
+        };
+
+        // Build line span, with highlight if applicable
+        let is_highlighted = options
+            .highlight_lines
+            .iter()
+            .any(|r| r.contains(&line_num));
+        if is_highlighted && let Some(prefix) = css_prefix {
+            let hl_class = match &highlighted.theme {
+                ThemeVariant::Single(_) => format!("{prefix}hl"),
+                ThemeVariant::Dual { .. } => {
+                    format!("{prefix}{LIGHT_SUFFIX}hl {prefix}{DARK_SUFFIX}hl")
+                }
+            };
+            format!(r#"<span class="giallo-l {hl_class}">{line_number_html}{line_content}</span>"#)
+        } else if let Some(style) = highlight_style {
+            format!(r#"<span class="giallo-l"{style}>{line_number_html}{line_content}</span>"#)
+        } else {
+            format!(r#"<span class="giallo-l">{line_number_html}{line_content}</span>"#)
         }
     }
 }

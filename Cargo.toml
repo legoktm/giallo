@@ -33,6 +33,9 @@ log = "0.4"
 [features]
 tools = ["dump"]
 dump = ["dep:bitcode", "dep:zstd"]
+# Embed the prebuilt builtin.zst. This is separate from `dump` so that callers can
+# enable dump/load support without forcing giallo to embed its own registry asset.
+builtin = ["dump"]
 
 [dev-dependencies]
 criterion = "0.8"

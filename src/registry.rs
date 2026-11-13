@@ -43,7 +43,7 @@ impl Dump {
     }
 }
 
-#[cfg(feature = "dump")]
+#[cfg(feature = "builtin")]
 const BUILTIN_DATA: &[u8] = include_bytes!("../builtin.zst");
 
 /// The default grammar name, where nothing is highlighted
@@ -717,7 +717,7 @@ impl Registry {
         Self::load(&compressed_data)
     }
 
-    #[cfg(feature = "dump")]
+    #[cfg(feature = "builtin")]
     /// Load the builtin registry containing all grammars and themes from grammars-themes
     /// This is a no-op when called multiple times: eg if you have multiple threads all trying
     /// to call Registry::builtin, only the first one will actually load things.
